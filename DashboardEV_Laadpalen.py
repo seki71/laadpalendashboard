@@ -23,13 +23,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LAADPAAL_CSV_PATH = os.path.join(BASE_DIR, "laadpaaldata.csv")
 CHARGING_PKL_PATH = os.path.join(BASE_DIR, "Charging_data.pkl")
 CARS_PKL_PATH = os.path.join(BASE_DIR, "cars.pkl")
+EV_PERCENTAGE_CSV_PATH = os.path.join(BASE_DIR, "table_EV%.csv")
 
-# Optioneel:
-# Voeg een GeoJSON met Nederlandse provincies toe voor een exacte provinciekaart.
-# Verwachte bestandsnaam:
-# nl_provinces.geojson
-# De file moet een provincienaam bevatten in een property zoals:
-# "name", "provincie", "province", "statnaam" of "naam"
+# Optioneel GeoJSON
 NL_PROVINCES_GEOJSON_PATH = os.path.join(BASE_DIR, "nl_provinces.geojson")
 
 # =========================
@@ -41,14 +37,14 @@ OCM_URL = "https://api.openchargemap.io/v3/poi"
 OCM_PARAMS = {
     "output": "json",
     "countrycode": "NL",
-    "maxresults": 1000,
+    "maxresults": 10000,
     "compact": False,
     "verbose": False,
     "key": API_KEY
 }
 
 HEADERS = {
-    "User-Agent": "KoenEVPressureDashboard/5.0"
+    "User-Agent": "KoenEVPressureDashboard/6.0"
 }
 
 # =========================
@@ -115,8 +111,6 @@ PROVINCIE_MAPPING = {
     "Zeeland": "Zeeland"
 }
 
-# Simpele bounding boxes als fallback om ALLE laadlocaties alsnog
-# toe te wijzen aan een van de 12 provincies.
 PROVINCIE_COORDINATEN = {
     "Noord-Holland": (52.25, 53.25, 4.45, 5.55),
     "Zuid-Holland": (51.70, 52.35, 3.85, 5.05),
@@ -242,6 +236,29 @@ def voeg_geojson_grens_toe(kaart, geojson_data):
     except Exception:
         pass
 
+def normaliseer_plaatsnaam(naam):
+    if pd.isna(naam):
+        return None
+    naam = str(naam).strip().lower()
+    naam = naam.replace("-", " ")
+    naam = " ".join(naam.split())
+    return naam
+
+def schaal_0_1(series):
+    s = pd.to_numeric(series, errors="coerce")
+    if s.isna().all():
+        return pd.Series([0] * len(series), index=series.index)
+    s = s.fillna(0)
+    if s.max() == s.min():
+        return pd.Series([0] * len(series), index=series.index)
+    return (s - s.min()) / (s.max() - s.min())
+
+def minmax_omgekeerd(series):
+    s = pd.to_numeric(series, errors="coerce").fillna(0)
+    if s.max() == s.min():
+        return pd.Series([0] * len(s), index=s.index)
+    return 1 - ((s - s.min()) / (s.max() - s.min()))
+
 # =========================
 # DATA LADEN
 # =========================
@@ -278,7 +295,6 @@ def laad_openchargemap_data():
 
     df = df.dropna(subset=["AddressInfo.Latitude", "AddressInfo.Longitude"]).copy()
 
-    # Extra veiligheidsfilter zodat alleen Nederland in beeld blijft
     df = df[
         df["AddressInfo.Latitude"].between(50.7, 53.7) &
         df["AddressInfo.Longitude"].between(3.1, 7.3)
@@ -296,10 +312,8 @@ def laad_openchargemap_data():
         df["Provincie_raw"] = None
         df["Provincie"] = None
 
-    # Eerst provincie op naam
     df["Provincie_final"] = df["Provincie"].where(df["Provincie"].isin(OFFICIELE_PROVINCIES))
 
-    # Daarna ontbrekende provincies opvullen met coordinaten
     df["Provincie_final"] = df.apply(
         lambda row: row["Provincie_final"]
         if pd.notna(row["Provincie_final"])
@@ -378,6 +392,32 @@ def laad_cars_pkl():
 
     return df
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def laad_ev_percentage_csv():
+    df = pd.read_csv(EV_PERCENTAGE_CSV_PATH)
+    df.columns = [col.strip() for col in df.columns]
+
+    gemeente_col = "Gemeentenaam"
+    ev_col = "% autobezitters met stekkerauto (%)"
+
+    if gemeente_col not in df.columns or ev_col not in df.columns:
+        raise ValueError("Kolommen 'Gemeentenaam' en '% autobezitters met stekkerauto (%)' zijn niet gevonden.")
+
+    df = df[[gemeente_col, ev_col]].copy()
+
+    df[ev_col] = (
+        df[ev_col]
+        .astype(str)
+        .str.replace("%", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.strip()
+    )
+    df[ev_col] = pd.to_numeric(df[ev_col], errors="coerce")
+
+    df["Plaats_norm"] = df[gemeente_col].apply(normaliseer_plaatsnaam)
+
+    return df
+
 # =========================
 # DATA INLADEN
 # =========================
@@ -405,17 +445,24 @@ except Exception as e:
     df_cars = None
     st.warning(f"Kon cars.pkl niet laden: {e}")
 
+try:
+    df_ev_percent = laad_ev_percentage_csv()
+except Exception as e:
+    df_ev_percent = None
+    st.warning(f"Kon table_EV%.csv niet laden: {e}")
+
 geojson_data = laad_geojson_bestand()
 geojson_naamveld = vind_geojson_naamveld(geojson_data)
 
 # =========================
 # TABS
 # =========================
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Infrastructuur",
     "Laadgedrag",
     "Auto's",
-    "Drukanalyse"
+    "Drukanalyse",
+    "EV vs Laadpalen"
 ])
 
 # =========================
@@ -681,6 +728,70 @@ with tab4:
         hoogste_druk = df_druk["Relatieve_druk_proxy_punten"].idxmax()
         st.write(f"Provincie met hoogste relatieve drukproxy: **{hoogste_druk}**")
 
+    st.subheader("Laaddruk-proxy per plaats")
+
+    df_plaats = df_ocm.copy()
+    df_plaats = df_plaats[df_plaats["AddressInfo.Town"].notna()].copy()
+    df_plaats["AddressInfo.Town"] = df_plaats["AddressInfo.Town"].astype(str).str.strip()
+    df_plaats = df_plaats[df_plaats["AddressInfo.Town"] != ""]
+
+    plaats_stats = (
+        df_plaats.groupby(["AddressInfo.Town", "Provincie_final"], dropna=False)
+        .agg(
+            Aantal_laadlocaties=("ID", "count"),
+            Aantal_laadpunten=("NumberOfPoints", "sum"),
+            Aantal_snelladers=("Snellader", "sum"),
+            Gem_max_vermogen_kw=("MaxPowerKW", "mean"),
+            Gem_lat=("AddressInfo.Latitude", "mean"),
+            Gem_lon=("AddressInfo.Longitude", "mean")
+        )
+        .reset_index()
+    )
+
+    plaats_stats["Aandeel_snelladers"] = (
+        plaats_stats["Aantal_snelladers"] / plaats_stats["Aantal_laadlocaties"]
+    ).fillna(0)
+
+    plaats_stats["Score_schaarste_punten"] = minmax_omgekeerd(plaats_stats["Aantal_laadpunten"])
+    plaats_stats["Score_schaarste_locaties"] = minmax_omgekeerd(plaats_stats["Aantal_laadlocaties"])
+    plaats_stats["Score_schaarste_snelladers"] = minmax_omgekeerd(plaats_stats["Aandeel_snelladers"])
+
+    plaats_stats["Laaddruk_proxy"] = (
+        0.5 * plaats_stats["Score_schaarste_punten"] +
+        0.3 * plaats_stats["Score_schaarste_locaties"] +
+        0.2 * plaats_stats["Score_schaarste_snelladers"]
+    )
+
+    plaats_stats = plaats_stats.sort_values("Laaddruk_proxy", ascending=False)
+
+    if not plaats_stats.empty:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Plek met hoogste druk-proxy", plaats_stats.iloc[0]["AddressInfo.Town"])
+        with col2:
+            st.metric("Score", round(plaats_stats.iloc[0]["Laaddruk_proxy"], 3))
+
+    st.subheader("Top 10 plekken met hoogste laaddruk-proxy")
+    top10_plaatsen = plaats_stats.head(10).set_index("AddressInfo.Town")["Laaddruk_proxy"]
+    st.bar_chart(top10_plaatsen)
+
+    st.subheader("Tabel: laaddruk per plaats")
+    st.dataframe(
+        plaats_stats[
+            [
+                "AddressInfo.Town",
+                "Provincie_final",
+                "Aantal_laadlocaties",
+                "Aantal_laadpunten",
+                "Aantal_snelladers",
+                "Aandeel_snelladers",
+                "Gem_max_vermogen_kw",
+                "Laaddruk_proxy"
+            ]
+        ].head(50),
+        width="stretch"
+    )
+
     if geojson_data is not None and geojson_naamveld is not None:
         st.subheader("Drukkaart per provincie")
 
@@ -711,3 +822,156 @@ with tab4:
 
     st.subheader("Tabel drukanalyse")
     st.dataframe(df_druk, width="stretch")
+
+# =========================
+# TAB 5 EV VS LAADPALEN
+# =========================
+with tab5:
+    st.subheader("Vergelijking: EV-aandeel vs laadpalen")
+
+    if df_ev_percent is None:
+        st.info("table_EV%.csv kon niet worden geladen.")
+    else:
+        df_vergelijk = df_ocm.copy()
+        df_vergelijk = df_vergelijk[df_vergelijk["AddressInfo.Town"].notna()].copy()
+        df_vergelijk["AddressInfo.Town"] = df_vergelijk["AddressInfo.Town"].astype(str).str.strip()
+        df_vergelijk = df_vergelijk[df_vergelijk["AddressInfo.Town"] != ""]
+        df_vergelijk["Plaats_norm"] = df_vergelijk["AddressInfo.Town"].apply(normaliseer_plaatsnaam)
+
+        plaats_laad = (
+            df_vergelijk.groupby(["Plaats_norm", "AddressInfo.Town", "Provincie_final"], dropna=False)
+            .agg(
+                Aantal_laadlocaties=("ID", "count"),
+                Aantal_laadpunten=("NumberOfPoints", "sum"),
+                Aantal_snelladers=("Snellader", "sum"),
+                Gem_lat=("AddressInfo.Latitude", "mean"),
+                Gem_lon=("AddressInfo.Longitude", "mean"),
+                Gem_max_vermogen_kw=("MaxPowerKW", "mean")
+            )
+            .reset_index()
+        )
+
+        df_merge = df_ev_percent.merge(
+            plaats_laad,
+            on="Plaats_norm",
+            how="left"
+        )
+
+        df_match = df_merge.dropna(subset=["Gem_lat", "Gem_lon"]).copy()
+
+        ev_col = "% autobezitters met stekkerauto (%)"
+
+        if df_match.empty:
+            st.warning("Er zijn geen matches gevonden tussen gemeentenaam en plaatsnaam in OpenChargeMap.")
+        else:
+            df_match["EV_index"] = schaal_0_1(df_match[ev_col])
+            df_match["Laadpunten_index"] = schaal_0_1(df_match["Aantal_laadpunten"])
+            df_match["Laadlocaties_index"] = schaal_0_1(df_match["Aantal_laadlocaties"])
+
+            df_match["Spanningsscore"] = df_match["EV_index"] - df_match["Laadpunten_index"]
+
+            df_match["Laadpunten_per_EV_pct"] = df_match.apply(
+                lambda row: row["Aantal_laadpunten"] / row[ev_col]
+                if pd.notna(row["Aantal_laadpunten"]) and pd.notna(row[ev_col]) and row[ev_col] != 0
+                else None,
+                axis=1
+            )
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Gemeenten in EV-bestand", len(df_ev_percent))
+            col2.metric("Matches met laadpaaldata", len(df_match))
+            col3.metric("Niet gematcht", len(df_ev_percent) - len(df_match))
+
+            st.markdown("""
+            **Uitleg vergelijking**
+            - **EV-aandeel** = percentage autobezitters met stekkerauto
+            - **Laadpunten** = totaal aantal laadpunten uit OpenChargeMap
+            - **Spanningsscore** = relatief hoog EV-aandeel minus relatief veel laadpunten
+            → een **hogere score** betekent: relatief meer EV's dan laadpunten
+            """)
+
+            kaart_optie = st.radio(
+                "Toon op kaart",
+                ["EV-aandeel", "Laadpunten", "Spanningsscore"],
+                horizontal=True
+            )
+
+            m_ev = maak_basiskaart()
+            voeg_geojson_grens_toe(m_ev, geojson_data)
+
+            for _, row in df_match.iterrows():
+                plaatsnaam = row.get("Gemeentenaam", "Onbekend")
+                laadpunten = row.get("Aantal_laadpunten", 0)
+                laadlocaties = row.get("Aantal_laadlocaties", 0)
+                ev_pct = row.get(ev_col, 0)
+                spanningsscore = row.get("Spanningsscore", 0)
+
+                if kaart_optie == "EV-aandeel":
+                    waarde = ev_pct
+                    radius = 5 + (float(ev_pct) * 2 if pd.notna(ev_pct) else 0)
+                elif kaart_optie == "Laadpunten":
+                    waarde = laadpunten
+                    radius = 5 + min(float(laadpunten), 100) * 0.25 if pd.notna(laadpunten) else 5
+                else:
+                    waarde = spanningsscore
+                    radius = 6 + abs(float(spanningsscore)) * 15 if pd.notna(spanningsscore) else 6
+
+                popup = (
+                    f"<b>{plaatsnaam}</b><br>"
+                    f"EV-aandeel: {round(ev_pct, 2)}%<br>"
+                    f"Laadpunten: {int(laadpunten) if pd.notna(laadpunten) else 0}<br>"
+                    f"Laadlocaties: {int(laadlocaties) if pd.notna(laadlocaties) else 0}<br>"
+                    f"Snelladers: {int(row.get('Aantal_snelladers', 0)) if pd.notna(row.get('Aantal_snelladers', 0)) else 0}<br>"
+                    f"Provincie: {row.get('Provincie_final', 'Onbekend')}<br>"
+                    f"Spanningsscore: {round(spanningsscore, 3)}"
+                )
+
+                folium.CircleMarker(
+                    location=[row["Gem_lat"], row["Gem_lon"]],
+                    radius=radius,
+                    popup=popup,
+                    tooltip=f"{plaatsnaam}: {round(waarde, 2) if pd.notna(waarde) else 0}",
+                    fill=True,
+                    fill_opacity=0.7,
+                    color="#333333",
+                    weight=1
+                ).add_to(m_ev)
+
+            st_folium(m_ev, height=720, width=None, returned_objects=[])
+
+            st.subheader("Top 15 gemeenten met hoogste EV-aandeel")
+            top_ev = df_match.sort_values(ev_col, ascending=False)[
+                ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Spanningsscore"]
+            ].head(15)
+            st.dataframe(top_ev, width="stretch")
+
+            st.subheader("Top 15 gemeenten met meeste laadpunten")
+            top_laad = df_match.sort_values("Aantal_laadpunten", ascending=False)[
+                ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Spanningsscore"]
+            ].head(15)
+            st.dataframe(top_laad, width="stretch")
+
+            st.subheader("Top 15 gemeenten met hoogste relatieve spanning")
+            top_spanning = df_match.sort_values("Spanningsscore", ascending=False)[
+                ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Aantal_laadlocaties", "Spanningsscore"]
+            ].head(15)
+            st.dataframe(top_spanning, width="stretch")
+
+            st.subheader("Complete vergelijkingstabel")
+            st.dataframe(
+                df_match[
+                    [
+                        "Gemeentenaam",
+                        ev_col,
+                        "AddressInfo.Town",
+                        "Provincie_final",
+                        "Aantal_laadpunten",
+                        "Aantal_laadlocaties",
+                        "Aantal_snelladers",
+                        "Gem_max_vermogen_kw",
+                        "Laadpunten_per_EV_pct",
+                        "Spanningsscore"
+                    ]
+                ].sort_values("Spanningsscore", ascending=False),
+                width="stretch"
+            )
