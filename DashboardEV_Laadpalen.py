@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import streamlit as st
 import folium
+import plotly.express as px
 
 from folium.plugins import FastMarkerCluster, HeatMap
 from streamlit_folium import st_folium
@@ -13,7 +14,7 @@ from streamlit_folium import st_folium
 # =========================
 st.set_page_config(page_title="Dashboard Elektrisch Vervoer", layout="wide")
 st.title("Dashboard Elektrisch Vervoer")
-st.subheader("Analyse van laadinfrastructuur, gebruik en voertuigen in Nederland")
+st.subheader("Waar is de grootste druk op laadpalen in Nederland?")
 
 # =========================
 # BESTANDSPADEN
@@ -490,18 +491,19 @@ gemeente_geojson_naamveld = vind_gemeente_naamveld(gemeente_geojson_data)
 # TABS
 # =========================
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Infrastructuur",
+tab1, tab2, tab3 = st.tabs([
+    "Nederlandse kaart",
     "Laadgedrag",
-    "Auto's",
-    "EV vs Laadpalen"
+    "Drukanalyse",
 ])
 
 # =========================
 # TAB 1 INFRASTRUCTUUR
 # =========================
+
+
 with tab1:
-    st.subheader("Laadinfrastructuur in Nederland")
+    st.subheader("Laadpalen in Nederland")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Laadlocaties", len(df_ocm))
@@ -542,6 +544,7 @@ with tab1:
 
     m = maak_basiskaart()
     voeg_geojson_grens_toe(m, geojson_data)
+
 
     if kaart_type == "Laadlocaties":
         marker_data = []
@@ -723,10 +726,10 @@ with tab3:
             st.info("De provinciekaart kon niet exact worden getekend met het huidige GeoJSON-bestand.")
 
 # =========================
-# TAB 5 EV VS LAADPALEN
+# TAB 3 EV VS LAADPALEN
 # =========================
-with tab5:
-    st.subheader("Vergelijking: EV-aandeel vs laadpalen")
+
+
 
     if df_ev_percent is None:
         st.info("table_EV%.csv kon niet worden geladen.")
@@ -778,18 +781,9 @@ with tab5:
             df_match["Spanningsscore"] = pd.Series(dtype=float)
             df_match["Laadpunten_per_EV_pct"] = pd.Series(dtype=float)
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Gemeenten in EV-bestand", len(df_ev_percent))
-        col2.metric("Matches met laadpaaldata", len(df_match))
-        col3.metric("Niet gematcht", len(df_ev_percent) - len(df_match))
 
-        st.markdown("""
-        **Uitleg vergelijking**
-        - **EV-aandeel** = percentage autobezitters met stekkerauto
-        - **Laadpunten** = totaal aantal laadpunten uit OpenChargeMap
-        - **Spanningsscore** = relatief hoog EV-aandeel minus relatief veel laadpunten
-        → een **hogere score** betekent: relatief meer EV's dan laadpunten
-        """)
+
+
 
         st.subheader("Kaart: EV-aandeel per gemeente")
 
@@ -845,42 +839,29 @@ with tab5:
         else:
             st.info("Voor deze kaart heb je een bestand 'nl_gemeenten.geojson' nodig in dezelfde map als je Python-bestand.")
 
-        st.subheader("Top 15 gemeenten met hoogste EV-aandeel")
-        top_ev = df_ev_percent.sort_values(ev_col, ascending=False)[
-            ["Gemeentenaam", ev_col]
-        ].head(15)
-        st.dataframe(top_ev, width="stretch")
+    st.subheader("Scatterplot: laadpalen vs EV-aandeel")
 
-        if not df_match.empty:
-            st.subheader("Top 15 gemeenten met meeste laadpunten")
-            top_laad = df_match.sort_values("Aantal_laadpunten", ascending=False)[
-                ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Spanningsscore"]
-            ].head(15)
-            st.dataframe(top_laad, width="stretch")
+    scatter_df = df_match[
+        ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Aantal_laadlocaties", "Spanningsscore"]
+    ].dropna().copy()
 
-            st.subheader("Top 15 gemeenten met hoogste relatieve spanning")
-            top_spanning = df_match.sort_values("Spanningsscore", ascending=False)[
-                ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Aantal_laadlocaties", "Spanningsscore"]
-            ].head(15)
-            st.dataframe(top_spanning, width="stretch")
+    fig = px.scatter(
+        scatter_df,
+        x="Aantal_laadpunten",
+        y=ev_col,
+        hover_name="Gemeentenaam",
+        hover_data={
+            "Aantal_laadpunten": True,
+            "Aantal_laadlocaties": True,
+            "Spanningsscore": ':.3f'
+        },
+        title="Aantal laadpalen tegenover aandeel elektrische auto's"
+    )
 
-            st.subheader("Complete vergelijkingstabel")
-            st.dataframe(
-                df_match[
-                    [
-                        "Gemeentenaam",
-                        ev_col,
-                        "AddressInfo.Town",
-                        "Provincie_final",
-                        "Aantal_laadpunten",
-                        "Aantal_laadlocaties",
-                        "Aantal_snelladers",
-                        "Gem_max_vermogen_kw",
-                        "Laadpunten_per_EV_pct",
-                        "Spanningsscore"
-                    ]
-                ].sort_values("Spanningsscore", ascending=False),
-                width="stretch"
-            )
-        else:
-            st.info("Er zijn nog geen bruikbare matches gevonden tussen gemeentenaam en plaatsnaam voor de vergelijking met laadpalen.")
+    fig.update_layout(
+        xaxis_title="Aantal laadpalen",
+        yaxis_title="Aandeel elektrische auto's (%)",
+        height=600
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
