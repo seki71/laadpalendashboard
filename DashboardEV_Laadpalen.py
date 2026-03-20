@@ -40,7 +40,7 @@ OCM_URL = "https://api.openchargemap.io/v3/poi"
 OCM_PARAMS = {
     "output": "json",
     "countrycode": "NL",
-    "maxresults": 5000,
+    "maxresults": 2000,
     "compact": False,
     "verbose": False,
     "key": API_KEY
