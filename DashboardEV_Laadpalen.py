@@ -838,95 +838,74 @@ with tab3:
             st.caption("De kaartkleur is gebaseerd op het EV-aandeel per gemeente.")
         else:
             st.info("Voor deze kaart heb je een bestand 'nl_gemeenten.geojson' nodig in dezelfde map als je Python-bestand.")
+    with tab3:
+        st.subheader("Scatterplot: laadpalen vs EV-aandeel")
 
-    st.subheader("Scatterplot: laadpalen vs EV-aandeel")
+    scatter_df = df_match[
+        ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Aantal_laadlocaties", "Spanningsscore"]
+    ].dropna().copy()
 
-scatter_df = df_match[
-    ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Aantal_laadlocaties", "Spanningsscore"]
-].dropna().copy()
+    if not scatter_df.empty and len(scatter_df) >= 3:
+        fig = px.scatter(
+            scatter_df,
+            x="Aantal_laadpunten",
+            y=ev_col,
+            hover_name="Gemeentenaam",
+            hover_data={
+                "Aantal_laadpunten": True,
+                "Aantal_laadlocaties": True,
+                "Spanningsscore": ':.3f'
+            },
+            title="Aantal laadpalen tegenover aandeel elektrische auto's"
+        )
 
-fig = px.scatter(
-    scatter_df,
-    x="Aantal_laadpunten",
-    y=ev_col,
-    hover_name="Gemeentenaam",
-    hover_data={
-        "Aantal_laadpunten": True,
-        "Aantal_laadlocaties": True,
-        "Spanningsscore": ':.3f'
-    },
-    title="Aantal laadpalen tegenover aandeel elektrische auto's"
-)
+        # Regressielijn
+        x = scatter_df["Aantal_laadpunten"].values
+        y = scatter_df[ev_col].values
 
-# =========================
-# REGRESSIE + STATISTIEK
-# =========================
-if len(scatter_df) >= 3:
-    x = scatter_df["Aantal_laadpunten"].values
-    y = scatter_df[ev_col].values
+        slope, intercept = np.polyfit(x, y, 1)
+        x_line = np.linspace(x.min(), x.max(), 100)
+        y_line = slope * x_line + intercept
 
-    # Regressielijn
-    slope, intercept = np.polyfit(x, y, 1)
-    x_line = np.linspace(x.min(), x.max(), 100)
-    y_line = slope * x_line + intercept
+        fig.add_scatter(
+            x=x_line,
+            y=y_line,
+            mode="lines",
+            name="Regressielijn"
+        )
 
-    fig.add_scatter(
-        x=x_line,
-        y=y_line,
-        mode="lines",
-        name="Regressielijn"
-    )
+        # Correlatie en statistiek
+        r = np.corrcoef(x, y)[0, 1]
+        r_squared = r ** 2
 
-    # =========================
-    # CORRELATIE (r)
-    # =========================
-    r = np.corrcoef(x, y)[0, 1]
+        n = len(x)
+        if abs(r) < 1:
+            t_stat = r * np.sqrt((n - 2) / (1 - r**2))
+            p_value = 2 * (1 - 0.5 * (1 + __import__("math").erf(abs(t_stat) / np.sqrt(2))))
+        else:
+            p_value = 0.0
 
-    # R²
-    r_squared = r ** 2
+        fig.update_layout(
+            xaxis_title="Aantal laadpalen",
+            yaxis_title="Aandeel elektrische auto's (%)",
+            height=600
+        )
 
-    # =========================
-    # p-value (benadering)
-    # =========================
-    n = len(x)
-    t_stat = r * np.sqrt((n - 2) / (1 - r**2))
+        st.plotly_chart(fig, use_container_width=True)
 
-    # normale benadering (goed genoeg bij n > 30)
-    p_value = 2 * (1 - 0.5 * (1 + __import__("math").erf(abs(t_stat) / np.sqrt(2))))
+        st.markdown("### Regressie-analyse")
+        st.write(f"**Correlatie (r):** {r:.3f}")
+        st.write(f"**R²:** {r_squared:.3f}")
+        st.write(f"**p-waarde (benaderd):** {p_value:.5f}")
 
-    # =========================
-    # OUTPUT
-    # =========================
-    st.markdown("### 📊 Regressie-analyse")
+        if p_value < 0.05:
+            st.success("Er is een statistisch significante relatie.")
+        else:
+            st.warning("Er is geen statistisch significante relatie.")
 
-    st.write(f"**Correlatie (r):** {r:.3f}")
-    st.write(f"**R² (verklaarde variantie):** {r_squared:.3f}")
-    st.write(f"**p-waarde (benaderd):** {p_value:.5f}")
-
-    # Interpretatie
-    if p_value < 0.05:
-        st.success("Er is een **statistisch significante relatie**.")
+        if r > 0:
+            st.write("Positieve relatie: meer laadpalen hangt samen met een hoger EV-aandeel.")
+        else:
+            st.write("Negatieve relatie: meer laadpalen hangt samen met een lager EV-aandeel.")
     else:
-        st.warning("Geen statistisch significante relatie.")
-
-    # Sterkte
-    if abs(r) > 0.7:
-        st.write("➡️ Sterke correlatie")
-    elif abs(r) > 0.4:
-        st.write("➡️ Matige correlatie")
-    else:
-        st.write("➡️ Zwakke correlatie")
-
-    # Richting
-    if r > 0:
-        st.write("📈 Positieve relatie: meer laadpalen → hoger EV-aandeel")
-    else:
-        st.write("📉 Negatieve relatie: meer laadpalen → lager EV-aandeel")
-
-fig.update_layout(
-    xaxis_title="Aantal laadpalen",
-    yaxis_title="Aandeel elektrische auto's (%)",
-    height=600
-)
-
-st.plotly_chart(fig, use_container_width=True)
+        st.info("Onvoldoende data om een scatterplot met regressielijn te maken.")
