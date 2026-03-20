@@ -477,9 +477,8 @@ except Exception as e:
 
 try:
     df_ev_percent = laad_ev_percentage_csv()
-except Exception as e:
+except Exception:
     df_ev_percent = None
-    st.warning(f"Kon table_EV%.csv niet laden: {e}")
 
 geojson_data = laad_provincie_geojson_bestand()
 geojson_naamveld = vind_provincie_naamveld(geojson_data)
