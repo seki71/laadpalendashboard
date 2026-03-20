@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 import folium
 import plotly.express as px
+import numpy as np
 
 from folium.plugins import FastMarkerCluster, HeatMap
 from streamlit_folium import st_folium
@@ -840,27 +841,92 @@ with tab3:
 
     st.subheader("Scatterplot: laadpalen vs EV-aandeel")
 
-    scatter_df = df_match[
-        ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Aantal_laadlocaties", "Spanningsscore"]
-    ].dropna().copy()
+scatter_df = df_match[
+    ["Gemeentenaam", ev_col, "Aantal_laadpunten", "Aantal_laadlocaties", "Spanningsscore"]
+].dropna().copy()
 
-    fig = px.scatter(
-        scatter_df,
-        x="Aantal_laadpunten",
-        y=ev_col,
-        hover_name="Gemeentenaam",
-        hover_data={
-            "Aantal_laadpunten": True,
-            "Aantal_laadlocaties": True,
-            "Spanningsscore": ':.3f'
-        },
-        title="Aantal laadpalen tegenover aandeel elektrische auto's"
+fig = px.scatter(
+    scatter_df,
+    x="Aantal_laadpunten",
+    y=ev_col,
+    hover_name="Gemeentenaam",
+    hover_data={
+        "Aantal_laadpunten": True,
+        "Aantal_laadlocaties": True,
+        "Spanningsscore": ':.3f'
+    },
+    title="Aantal laadpalen tegenover aandeel elektrische auto's"
+)
+
+# =========================
+# REGRESSIE + STATISTIEK
+# =========================
+if len(scatter_df) >= 3:
+    x = scatter_df["Aantal_laadpunten"].values
+    y = scatter_df[ev_col].values
+
+    # Regressielijn
+    slope, intercept = np.polyfit(x, y, 1)
+    x_line = np.linspace(x.min(), x.max(), 100)
+    y_line = slope * x_line + intercept
+
+    fig.add_scatter(
+        x=x_line,
+        y=y_line,
+        mode="lines",
+        name="Regressielijn"
     )
 
-    fig.update_layout(
-        xaxis_title="Aantal laadpalen",
-        yaxis_title="Aandeel elektrische auto's (%)",
-        height=600
-    )
+    # =========================
+    # CORRELATIE (r)
+    # =========================
+    r = np.corrcoef(x, y)[0, 1]
 
-    st.plotly_chart(fig, use_container_width=True)
+    # R²
+    r_squared = r ** 2
+
+    # =========================
+    # p-value (benadering)
+    # =========================
+    n = len(x)
+    t_stat = r * np.sqrt((n - 2) / (1 - r**2))
+
+    # normale benadering (goed genoeg bij n > 30)
+    p_value = 2 * (1 - 0.5 * (1 + __import__("math").erf(abs(t_stat) / np.sqrt(2))))
+
+    # =========================
+    # OUTPUT
+    # =========================
+    st.markdown("### 📊 Regressie-analyse")
+
+    st.write(f"**Correlatie (r):** {r:.3f}")
+    st.write(f"**R² (verklaarde variantie):** {r_squared:.3f}")
+    st.write(f"**p-waarde (benaderd):** {p_value:.5f}")
+
+    # Interpretatie
+    if p_value < 0.05:
+        st.success("Er is een **statistisch significante relatie**.")
+    else:
+        st.warning("Geen statistisch significante relatie.")
+
+    # Sterkte
+    if abs(r) > 0.7:
+        st.write("➡️ Sterke correlatie")
+    elif abs(r) > 0.4:
+        st.write("➡️ Matige correlatie")
+    else:
+        st.write("➡️ Zwakke correlatie")
+
+    # Richting
+    if r > 0:
+        st.write("📈 Positieve relatie: meer laadpalen → hoger EV-aandeel")
+    else:
+        st.write("📉 Negatieve relatie: meer laadpalen → lager EV-aandeel")
+
+fig.update_layout(
+    xaxis_title="Aantal laadpalen",
+    yaxis_title="Aandeel elektrische auto's (%)",
+    height=600
+)
+
+st.plotly_chart(fig, use_container_width=True)
